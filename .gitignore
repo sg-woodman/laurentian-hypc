@@ -1,3 +1,11 @@
+# targets object store
+_targets/
+
+# Data, output, and testing directories
+/data/
+/output/
+/tmp/
+
 # History files
 .Rhistory
 .Rapp.history
@@ -47,3 +55,17 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Mac files
+.DS_Store
+
+# -- Quarto / RMarkdown rendered output ---------------------------------------
+# Auto-generated supporting asset folders created when previewing .qmd/.md
+*_files/
+# Rendered HTML (single-file outputs are fine to share but not to track)
+*.html
+# Quarto project cache
+.quarto/
+
+# -- Positron / VS Code -------------------------------------------------------
+.vscode/
