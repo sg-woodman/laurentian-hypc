@@ -1,0 +1,168 @@
+# Load the DS_01 tile directly for fast iteration
+las_ds01 <- readLAS(filtered_files[str_detect(
+  filtered_files,
+  "1kmZ175080514402022L"
+)])
+las_ds01 <- filter_poi(las_ds01, Classification %in% c(4L, 5L), Z > 0.5)
+
+plot_areas <- st_read(
+  here("data/processed/ES_forest_plot_spatial.gpkg"),
+  layer = "areas"
+) |>
+  filter(plot %in% c("DS_01", "DS_04", "DS_05", "DS_07")) |>
+  st_transform(6660)
+
+ds04_area <- st_read(
+  here("data/processed/ES_forest_plot_spatial.gpkg"),
+  layer = "areas"
+) |>
+  filter(plot == "DS_04") |>
+  st_transform(6660)
+
+# Clip to DS_01 plot + small buffer for context
+las_ds04_clip <- clip_roi(las_ds01, st_buffer(ds04_area, 20))
+
+# Test parameter sets targeting dense mixed stands
+param_sets <- list(
+  dense_v3 = li2012(dt1 = 0.5, dt2 = 0.8, R = 4, Zu = 8, hmin = 2),
+  dense_v4 = li2012(dt1 = 0.3, dt2 = 0.5, R = 3, Zu = 8, hmin = 2),
+  dense_v5 = li2012(dt1 = 0.3, dt2 = 0.5, R = 3, Zu = 6, hmin = 2),
+  dense_v6 = li2012(dt1 = 0.2, dt2 = 0.4, R = 3, Zu = 6, hmin = 2),
+  dense_v7 = li2012(dt1 = 0.2, dt2 = 0.3, R = 2.5, Zu = 6, hmin = 1.5),
+  best_v2 = li2012(dt1 = 0.2, dt2 = 0.4, R = 3, Zu = 6, hmin = 1.5)
+)
+
+results <- imap(param_sets, \(params, name) {
+  message("Testing: ", name)
+  las_seg <- segment_trees(las_ds04_clip, params)
+  crowns <- crown_metrics(
+    las_seg,
+    func = ~ list(Z_max = max(Z), npoints = .N),
+    geom = "convex"
+  )
+
+  # Only count crowns within DS_01 plot boundary
+  crowns_in <- crowns[
+    st_within(st_centroid(crowns), ds04_area, sparse = FALSE),
+  ]
+
+  tibble(
+    params = name,
+    n_crowns_plot = nrow(crowns_in),
+    n_field_trees = 37,
+    ratio = round(nrow(crowns_in) / 37, 2),
+    mean_crown_m2 = round(mean(as.numeric(st_area(crowns_in))), 1),
+    mean_Z_max = round(mean(crowns_in$Z_max), 1)
+  )
+})
+
+bind_rows(results)
+
+# Test dense_v6 across all plots to ensure it generalises
+best_params <- li2012(dt1 = 0.2, dt2 = 0.4, R = 3, Zu = 6, hmin = 1.5)
+
+las_seg_best <- segment_trees(las_ds04_clip, best_params)
+
+# Fix 1: Switch from convex to concave hulls — tighter crown boundaries
+# that don't bleed outside the actual point distribution
+crowns_best <- crown_metrics(
+  las_seg_best,
+  func = ~ list(Z_max = max(Z), npoints = .N),
+  geom = "concave", # tighter than convex
+  concavity = 2 # higher = tighter; tune between 1.5-3
+)
+
+# Fix 2: Try dropping hmin further to capture the central gap trees
+best_params_v2 <- li2012(dt1 = 0.2, dt2 = 0.4, R = 3, Zu = 6, hmin = 1.5)
+
+las_seg_v2 <- segment_trees(las_ds04_clip, best_params_v2)
+crowns_v2 <- crown_metrics(
+  las_seg_v2,
+  func = ~ list(Z_max = max(Z), npoints = .N),
+  geom = "concave",
+  concavity = 2
+)
+
+crowns_v2_in <- crowns_v2[
+  st_within(st_centroid(crowns_v2), ds04_area, sparse = FALSE),
+]
+
+cat("dense_v6 hmin=1.5, concave hulls:", nrow(crowns_v2_in), "crowns\n")
+
+# Fix 3: Updated visual with concave hulls and plot boundary overlay
+ggplot() +
+  geom_sf(
+    data = plot_areas[plot_areas$plot == "DS_01", ],
+    fill = NA,
+    colour = "black",
+    linewidth = 0.8,
+    linetype = "dashed"
+  ) +
+  geom_sf(
+    data = crowns_v2_in,
+    fill = "lightblue",
+    colour = "steelblue",
+    linewidth = 0.4,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    data = daisy_plot[daisy_plot$plot == "DS_01", ],
+    aes(colour = crown_class),
+    size = 2
+  ) +
+  scale_colour_viridis_d() +
+  labs(title = "DS_01: dense_v6 hmin=1.5, concave hulls") +
+  theme_minimal()
+
+cat("Crown count hmin=1.5, concave:", nrow(crowns_v2_in), "\n")
+# Compare to dense_v6 hmin=2 convex: 31 crowns
+
+daisy_trees <- st_read(
+  here("data/processed/ES_forest_plot_spatial.gpkg"),
+  layer = "trees"
+) |>
+  filter(plot %in% c("DS_01", "DS_04", "DS_05", "DS_07"))
+
+daisy_trees |>
+  st_drop_geometry() |>
+  filter(crown_class %in% c("Dominant", "Co-dominant")) |>
+  count(species, sort = TRUE)
+
+
+# Instead of n_crowns vs n_stems, compare:
+# 1. % plot area covered by crowns (should be high in dense stands)
+# 2. Species composition proportion (do birch crowns dominate where birch stems dominate?)
+
+coverage <- st_intersection(crowns_in_plot, plot_area) |>
+  mutate(crown_area = st_area(geometry)) |>
+  summarise(pct_covered = sum(crown_area) / st_area(plot_area) * 100)
+
+
+daisy_plot <- st_read(
+  here("data/processed/ES_forest_plot_spatial.gpkg"),
+  layer = "trees"
+) |>
+  filter(plot %in% c("DS_01", "DS_04", "DS_05", "DS_07")) |>
+  st_transform(6660)
+
+# Quick crown count comparison across all plots
+test_plots <- unique(daisy_plot$plot)
+
+plot_counts <- map_dfr(test_plots, \(p) {
+  plot_area <- plot_areas[plot_areas$plot == p, ]
+  crowns_in <- crowns_best[
+    st_within(st_centroid(crowns_best), plot_area, sparse = FALSE),
+  ]
+  n_field <- sum(
+    daisy_plot$plot == p &
+      daisy_plot$crown_class %in% c("Dominant", "Co-dominant")
+  )
+  tibble(
+    plot = p,
+    n_crowns = nrow(crowns_in),
+    n_field = n_field,
+    ratio = round(nrow(crowns_in) / n_field, 2)
+  )
+})
+
+print(plot_counts)
